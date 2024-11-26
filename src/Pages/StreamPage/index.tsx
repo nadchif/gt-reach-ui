@@ -8,6 +8,7 @@ import { ArrowRightCircleIcon, InformationCircleIcon } from '@heroicons/react/16
 import logger from '../../util/logger';
 import ROUTES from '../../constants/ROUTES';
 import { formatErrorMessage } from '../../util';
+import { SpeakerWaveIcon, SpeakerXMarkIcon } from '@heroicons/react/24/outline';
 
 type TState = {
   status: 'connecting' | 'connected' | 'error';
@@ -17,6 +18,16 @@ type TState = {
 };
 
 function StreamPage() {
+  const audioContextRef = useRef<AudioContext>();
+  const audioQueueRef = useRef<ArrayBuffer[]>([]);
+  const isPlayingRef = useRef(false);
+
+  const [shouldStreamAudio, setShouldStreamAudio] = useState(false);
+  const shouldStreamAudioRef = useRef(shouldStreamAudio);
+  useEffect(() => {
+    shouldStreamAudioRef.current = shouldStreamAudio;
+  }, [shouldStreamAudio]);
+
   const [language, setLanguage] = useState<{ code: string; name: string }>();
 
   const [latestTranslation, setLatestTranslation] = useState<{
@@ -35,7 +46,38 @@ function StreamPage() {
     if (!code || !language) {
       return;
     }
-    const handleSocketMessage = (event: MessageEvent) => {
+    const playAudioQueue = async () => {
+      const audioContext = audioContextRef.current;
+      if (!audioContext) {
+        return;
+      }
+      isPlayingRef.current = true;
+      while (audioQueueRef.current.length > 0) {
+        const buffer = audioQueueRef.current.shift();
+        if (!buffer) continue;
+        const audioBuffer = await audioContext.decodeAudioData(buffer);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+        await new Promise((resolve) => {
+          source.onended = resolve;
+        });
+      }
+      isPlayingRef.current = false;
+    };
+
+    const handleSocketMessage = async (event: MessageEvent) => {
+      if (event.data instanceof Blob) {
+        if (shouldStreamAudioRef.current) {
+          const buffer = await event.data.arrayBuffer();
+          audioQueueRef.current.push(buffer);
+          if (!isPlayingRef.current) {
+            playAudioQueue();
+          }
+        }
+        return;
+      }
       const data = JSON.parse(event.data);
       if (data.type === EMessageType.JOINED) {
         logger.log('Joined:', data);
@@ -97,6 +139,7 @@ function StreamPage() {
     return () => {
       logger.log('cleanup');
       socketRef.current?.close();
+      audioContextRef.current?.close();
     };
   }, [code, language]);
 
@@ -104,6 +147,28 @@ function StreamPage() {
     const lang = config.languages.find((lang) => lang.code === code);
     setLanguage(lang);
   };
+
+  const toggleAudioStream = () => {
+    setShouldStreamAudio((prev) => {
+      if (!audioContextRef.current && !prev) {
+        audioContextRef.current = new AudioContext();
+      } else {
+        isPlayingRef.current = false;
+        audioContextRef.current?.close();
+        audioContextRef.current = undefined;
+      }
+      if (socketRef.current) {
+        socketRef.current.send(
+          JSON.stringify({
+            type: prev ? EMessageType.LEAVE_AUDIO : EMessageType.JOIN_AUDIO,
+            code,
+          })
+        );
+      }
+      return !prev;
+    });
+  };
+  console.log('audio', audioContextRef.current);
 
   return (
     <>
@@ -142,28 +207,44 @@ function StreamPage() {
       )}
       {language && (
         <>
-          <StreamHeader languagesCount={languages.length} streamerCount={streamerCount} status={status} />
+          <Flex justify="between" align="center" wrap="wrap">
+            <Text size="3">
+              Stream:
+              <Text as="span" weight="bold">
+                {code}
+              </Text>
+            </Text>
+            <Box>
+              <Button variant="soft" color={shouldStreamAudio ? undefined : 'red'} onClick={toggleAudioStream}>
+                {shouldStreamAudio ? <SpeakerWaveIcon height="20" /> : <SpeakerXMarkIcon height="20" />}
+              </Button>
+            </Box>
+          </Flex>
           <Box my="3">
-            <Card>
-              <Text size="2" as="div" weight="bold">
-                {language.name} Translation
-              </Text>
-              <Text size="6" as="div" color="gray" highContrast={!!latestTranslation}>
-                {latestTranslation?.translation ||
-                  (!errorMessage && 'Translations may take a while before they star appearing.') ||
-                  '-'}
-              </Text>
-            </Card>
-          </Box>
-          <Box my="3">
-            <Card>
-              <Text size="2" as="div" weight="bold">
-                Original
-              </Text>
-              <Text size="2" as="div">
-                {latestTranslation?.original || '-'}
-              </Text>
-            </Card>
+            <Separator size="4" my="2" />
+            <StreamHeader languagesCount={languages.length} streamerCount={streamerCount} status={status} />
+            <Box my="3">
+              <Card>
+                <Text size="2" as="div" weight="bold">
+                  {language.name} Translation
+                </Text>
+                <Text size="6" as="div" color="gray" highContrast={!!latestTranslation}>
+                  {latestTranslation?.translation ||
+                    (!errorMessage && 'Translations may take a while before they star appearing.') ||
+                    '-'}
+                </Text>
+              </Card>
+            </Box>
+            <Box my="3">
+              <Card>
+                <Text size="2" as="div" weight="bold">
+                  Original
+                </Text>
+                <Text size="2" as="div">
+                  {latestTranslation?.original || '-'}
+                </Text>
+              </Card>
+            </Box>
           </Box>
         </>
       )}
